@@ -13,7 +13,9 @@ import {
   LayoutDashboard,
   Settings,
   ChevronRight,
-  Activity
+  Activity,
+  AlertCircle,
+  X
 } from 'lucide-react';
 import { 
   AreaChart, 
@@ -127,6 +129,9 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'agents' | 'history'>('dashboard');
   const [marketPrices, setMarketPrices] = useState<Record<string, number>>({});
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
+  const [stockHistory, setStockHistory] = useState<Record<string, { time: string, price: number }[]>>({});
+  const [error, setError] = useState<{ message: string, code?: number } | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -165,19 +170,49 @@ export default function App() {
 
   useEffect(() => {
     updatePrices();
-    const interval = setInterval(updatePrices, 60000); // Update every minute
-    return () => clearInterval(interval);
-  }, []);
+    const priceInterval = setInterval(updatePrices, 60000); // Update every minute
+    
+    // Auto-trigger AI analysis every 10 minutes
+    const analysisInterval = setInterval(() => {
+      handleAIAnalysis();
+    }, 600000);
+
+    return () => {
+      clearInterval(priceInterval);
+      clearInterval(analysisInterval);
+    };
+  }, [activePortfolioId]); // Re-run if portfolio changes to ensure correct context
+
+  // Track stock history for the selected chart
+  useEffect(() => {
+    if (Object.keys(marketPrices).length > 0) {
+      const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      setStockHistory(prev => {
+        const next = { ...prev };
+        Object.entries(marketPrices).forEach(([symbol, price]) => {
+          if (!next[symbol]) next[symbol] = [];
+          next[symbol] = [...next[symbol], { time: now, price }].slice(-20); // Keep last 20 points
+        });
+        return next;
+      });
+    }
+  }, [marketPrices]);
 
   const handleAIAnalysis = async () => {
     if (isAnalyzing) return;
     setIsAnalyzing(true);
     setActiveTab('agents');
+    setError(null);
 
     try {
       const insights = await getMarketInsights(WATCHLIST);
-      const { messages: newMessages, decision } = await runAgentDebate(portfolio, insights, messages);
+      if (!insights) throw new Error("Could not fetch market insights. Please try again later.");
       
+      const debateResult = await runAgentDebate(portfolio, insights, messages);
+      const { messages: newMessages, decision } = debateResult;
+      
+      if (newMessages.length === 0) throw new Error("Agent debate failed to start.");
+
       // Stream messages for effect
       for (const msg of newMessages) {
         setMessages(prev => [...prev, msg]);
@@ -187,8 +222,15 @@ export default function App() {
       if (decision && decision.type !== 'HOLD') {
         executeTrade(decision);
       }
-    } catch (error) {
-      console.error("Analysis failed", error);
+    } catch (err: any) {
+      console.error("Analysis failed", err);
+      const errorMessage = err?.message || "An unexpected error occurred during analysis.";
+      setError({ 
+        message: errorMessage.includes("429") || errorMessage.includes("quota") 
+          ? "AI Rate Limit Reached. The agents are taking a break. Please wait a few minutes." 
+          : errorMessage,
+        code: err?.status === "RESOURCE_EXHAUSTED" || errorMessage.includes("429") ? 429 : undefined
+      });
     } finally {
       setIsAnalyzing(false);
     }
@@ -302,7 +344,7 @@ export default function App() {
           <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/20">
             <BrainCircuit className="text-white w-6 h-6" />
           </div>
-          <span className="font-bold text-xl tracking-tight">Aegis AI</span>
+          <span className="font-bold text-xl tracking-tight">Atak Trading</span>
         </div>
 
         <nav className="flex-1 px-4 py-4 space-y-6 overflow-y-auto custom-scrollbar">
@@ -380,7 +422,35 @@ export default function App() {
       </aside>
 
       {/* Main Content */}
-      <main className="ml-64 p-8 max-w-7xl mx-auto">
+      <main className="ml-64 p-8 max-w-7xl mx-auto relative">
+        {/* Error Banner */}
+        <AnimatePresence>
+          {error && (
+            <motion.div 
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-2xl flex items-center justify-between shadow-lg shadow-red-500/5"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 bg-red-500/20 rounded-full flex items-center justify-center">
+                  <AlertCircle className="text-red-400 w-5 h-5" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-red-200">{error.message}</p>
+                  {error.code === 429 && <p className="text-xs text-red-400/70">Automatic retries are active. Caching is enabled to reduce usage.</p>}
+                </div>
+              </div>
+              <button 
+                onClick={() => setError(null)}
+                className="p-2 hover:bg-white/5 rounded-lg transition-colors"
+              >
+                <X size={16} className="text-gray-400" />
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         <header className="flex items-center justify-between mb-10">
           <div>
             <div className="flex items-center gap-2 mb-1">
@@ -445,55 +515,73 @@ export default function App() {
               />
             </div>
 
-            {/* Chart Section */}
-            <div className="bg-[#18181b] border border-white/5 rounded-3xl p-8">
-              <div className="flex items-center justify-between mb-8">
-                <h2 className="text-xl font-bold">Performance History</h2>
-                <div className="flex gap-2">
-                  <span className="px-3 py-1 bg-blue-500/10 text-blue-400 text-xs font-bold rounded-full border border-blue-500/20">1D</span>
-                  <span className="px-3 py-1 text-gray-500 text-xs font-bold rounded-full hover:bg-white/5 cursor-not-allowed">1W</span>
-                  <span className="px-3 py-1 text-gray-500 text-xs font-bold rounded-full hover:bg-white/5 cursor-not-allowed">1M</span>
+            {/* Charts Section */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Portfolio Performance */}
+              <div className="bg-[#18181b] border border-white/5 rounded-3xl p-8">
+                <div className="flex items-center justify-between mb-8">
+                  <h2 className="text-xl font-bold">Performance History</h2>
+                  <div className="flex gap-2">
+                    <span className="px-3 py-1 bg-blue-500/10 text-blue-400 text-xs font-bold rounded-full border border-blue-500/20">1D</span>
+                  </div>
+                </div>
+                <div className="h-[250px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={chartData}>
+                      <defs>
+                        <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" vertical={false} />
+                      <XAxis dataKey="name" stroke="#4b5563" fontSize={10} tickLine={false} axisLine={false} dy={10} />
+                      <YAxis stroke="#4b5563" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(v) => `$${(v/1000).toFixed(0)}k`} />
+                      <Tooltip contentStyle={{ backgroundColor: '#18181b', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px' }} itemStyle={{ color: '#fff' }} />
+                      <Area type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={3} fillOpacity={1} fill="url(#colorValue)" />
+                    </AreaChart>
+                  </ResponsiveContainer>
                 </div>
               </div>
-              <div className="h-[300px] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={chartData}>
-                    <defs>
-                      <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
-                        <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" vertical={false} />
-                    <XAxis 
-                      dataKey="name" 
-                      stroke="#4b5563" 
-                      fontSize={12} 
-                      tickLine={false} 
-                      axisLine={false} 
-                      dy={10}
-                    />
-                    <YAxis 
-                      stroke="#4b5563" 
-                      fontSize={12} 
-                      tickLine={false} 
-                      axisLine={false} 
-                      tickFormatter={(v) => `$${(v/1000).toFixed(0)}k`}
-                    />
-                    <Tooltip 
-                      contentStyle={{ backgroundColor: '#18181b', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px' }}
-                      itemStyle={{ color: '#fff' }}
-                    />
-                    <Area 
-                      type="monotone" 
-                      dataKey="value" 
-                      stroke="#3b82f6" 
-                      strokeWidth={3}
-                      fillOpacity={1} 
-                      fill="url(#colorValue)" 
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
+
+              {/* Selected Stock Chart */}
+              <div className="bg-[#18181b] border border-white/5 rounded-3xl p-8">
+                <div className="flex items-center justify-between mb-8">
+                  <div>
+                    <h2 className="text-xl font-bold">Stock Analysis</h2>
+                    <p className="text-xs text-gray-500">{selectedSymbol ? `Real-time data for ${selectedSymbol}` : 'Click a stock to view chart'}</p>
+                  </div>
+                  {selectedSymbol && (
+                    <div className="text-right">
+                      <div className="text-xl font-bold font-mono">${marketPrices[selectedSymbol]?.toFixed(2)}</div>
+                      <div className="text-[10px] text-blue-400 font-bold uppercase">Live Price</div>
+                    </div>
+                  )}
+                </div>
+                <div className="h-[250px] w-full flex items-center justify-center">
+                  {selectedSymbol && stockHistory[selectedSymbol] ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={stockHistory[selectedSymbol]}>
+                        <defs>
+                          <linearGradient id="colorStock" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" vertical={false} />
+                        <XAxis dataKey="time" stroke="#4b5563" fontSize={10} tickLine={false} axisLine={false} dy={10} />
+                        <YAxis domain={['auto', 'auto']} stroke="#4b5563" fontSize={10} tickLine={false} axisLine={false} />
+                        <Tooltip contentStyle={{ backgroundColor: '#18181b', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px' }} itemStyle={{ color: '#fff' }} />
+                        <Area type="monotone" dataKey="price" stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorStock)" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="text-center space-y-2">
+                      <Activity className="mx-auto text-gray-700" size={48} />
+                      <p className="text-sm text-gray-600">Select a stock from your holdings to view live performance</p>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -521,7 +609,14 @@ export default function App() {
                       const profit = (h.currentPrice - h.averagePrice) * h.shares;
                       const profitPct = ((h.currentPrice - h.averagePrice) / h.averagePrice) * 100;
                       return (
-                        <tr key={h.symbol} className="hover:bg-white/[0.02] transition-colors group">
+                        <tr 
+                          key={h.symbol} 
+                          onClick={() => setSelectedSymbol(h.symbol)}
+                          className={cn(
+                            "hover:bg-white/[0.02] transition-colors group cursor-pointer",
+                            selectedSymbol === h.symbol && "bg-white/[0.04]"
+                          )}
+                        >
                           <td className="px-6 py-4">
                             <div className="flex items-center gap-3">
                               <div className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center font-bold text-xs">

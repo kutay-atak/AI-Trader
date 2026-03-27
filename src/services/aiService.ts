@@ -3,6 +3,24 @@ import { AgentMessage, Portfolio, Stock } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
+// Cache for stock prices to reduce API calls
+const priceCache: Record<string, { price: number, timestamp: number }> = {};
+const CACHE_DURATION = 300000; // 5 minutes
+
+async function callWithRetry<T>(fn: () => Promise<T>, retries = 3, delay = 2000): Promise<T> {
+  try {
+    return await fn();
+  } catch (error: any) {
+    const isRateLimit = error?.message?.includes("429") || error?.status === "RESOURCE_EXHAUSTED";
+    if (isRateLimit && retries > 0) {
+      console.warn(`Rate limit hit. Retrying in ${delay}ms... (${retries} retries left)`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return callWithRetry(fn, retries - 1, delay * 2);
+    }
+    throw error;
+  }
+}
+
 export async function getMarketInsights(stocks: string[]) {
   const model = "gemini-3-flash-preview";
   const prompt = `Analyze the current market status for these US stocks: ${stocks.join(", ")}. 
@@ -10,14 +28,14 @@ export async function getMarketInsights(stocks: string[]) {
   Format the response as a JSON object with a 'marketSummary' string and an 'insights' array of objects { symbol, sentiment, reason }.`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callWithRetry(() => ai.models.generateContent({
       model,
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
         responseMimeType: "application/json"
       }
-    });
+    }));
     return JSON.parse(response.text);
   } catch (error) {
     console.error("Error fetching market insights:", error);
@@ -55,7 +73,7 @@ export async function runAgentDebate(
 
     Simulate a short debate between these agents. Each agent should provide one concise message.
     RiskRick must conclude the debate with a decision to BUY, SELL, or HOLD specific stocks.
-    The goal is to maximize returns while staying within the 10-stock limit.
+    The goal is to maximize returns while maintaining a full portfolio of EXACTLY 10 stocks whenever possible. If you have fewer than 10 stocks, prioritize finding high-quality BUY opportunities to reach the 10-stock limit.
     
     Return a JSON object with:
     - 'messages': Array of { agentId, agentName, role, content }
@@ -63,14 +81,14 @@ export async function runAgentDebate(
   `;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callWithRetry(() => ai.models.generateContent({
       model,
       contents: "Start the investment committee meeting.",
       config: {
         systemInstruction,
         responseMimeType: "application/json"
       }
-    });
+    }));
     
     const result = JSON.parse(response.text);
     return {
@@ -84,23 +102,48 @@ export async function runAgentDebate(
 }
 
 export async function getLivePrices(symbols: string[]): Promise<Record<string, number>> {
+  const now = Date.now();
+  const results: Record<string, number> = {};
+  const symbolsToFetch: string[] = [];
+
+  // Use cache if available and fresh
+  symbols.forEach(s => {
+    if (priceCache[s] && (now - priceCache[s].timestamp < CACHE_DURATION)) {
+      results[s] = priceCache[s].price;
+    } else {
+      symbolsToFetch.push(s);
+    }
+  });
+
+  if (symbolsToFetch.length === 0) return results;
+
   const model = "gemini-3-flash-preview";
-  const prompt = `Get the current real-time stock prices for: ${symbols.join(", ")}. 
+  const prompt = `Get the current real-time stock prices for: ${symbolsToFetch.join(", ")}. 
   Return a JSON object where keys are symbols and values are numbers (current price).`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callWithRetry(() => ai.models.generateContent({
       model,
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
         responseMimeType: "application/json"
       }
+    }));
+    
+    const fetchedPrices = JSON.parse(response.text);
+    Object.entries(fetchedPrices).forEach(([s, p]) => {
+      const price = typeof p === 'number' ? p : parseFloat(String(p));
+      if (!isNaN(price)) {
+        priceCache[s] = { price, timestamp: now };
+        results[s] = price;
+      }
     });
-    return JSON.parse(response.text);
+    
+    return results;
   } catch (error) {
     console.error("Error fetching live prices:", error);
-    // Fallback mock prices if search fails
-    return symbols.reduce((acc, s) => ({ ...acc, [s]: 150 + Math.random() * 50 }), {});
+    // Fallback mock prices if search fails, but don't cache them
+    return symbolsToFetch.reduce((acc, s) => ({ ...acc, [s]: results[s] || 150 + Math.random() * 50 }), results);
   }
 }
