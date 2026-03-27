@@ -133,6 +133,11 @@ export default function App() {
   const [stockHistory, setStockHistory] = useState<Record<string, { time: string, price: number }[]>>({});
   const [error, setError] = useState<{ message: string, code?: number } | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const portfolioRef = useRef(portfolio);
+
+  useEffect(() => {
+    portfolioRef.current = portfolio;
+  }, [portfolio]);
 
   useEffect(() => {
     localStorage.setItem('aegis_portfolios', JSON.stringify(portfolios));
@@ -154,18 +159,32 @@ export default function App() {
   };
 
   const updatePrices = async () => {
-    const symbols = [...new Set([...WATCHLIST, ...portfolio.holdings.map(h => h.symbol)])];
-    const prices = await getLivePrices(symbols);
-    setMarketPrices(prices);
-    
-    // Update portfolio holdings with new prices
-    setPortfolios(prev => prev.map(p => ({
-      ...p,
-      holdings: p.holdings.map(h => ({
-        ...h,
-        currentPrice: prices[h.symbol] || h.currentPrice
-      }))
-    })));
+    const currentPortfolio = portfolioRef.current;
+    const symbols = [...new Set([...WATCHLIST, ...currentPortfolio.holdings.map(h => h.symbol)])];
+    console.log("[App] Updating prices for symbols:", symbols);
+    try {
+      const prices = await getLivePrices(symbols);
+      console.log("[App] Received prices:", prices);
+      if (Object.keys(prices).length > 0) {
+        setMarketPrices(prices);
+        
+        // Update portfolio holdings with new prices
+        setPortfolios(prev => prev.map(p => {
+          if (p.id !== currentPortfolio.id) return p;
+          return {
+            ...p,
+            holdings: p.holdings.map(h => ({
+              ...h,
+              currentPrice: prices[h.symbol] || h.currentPrice
+            }))
+          };
+        }));
+      } else {
+        console.warn("[App] getLivePrices returned empty object");
+      }
+    } catch (err) {
+      console.error("[App] Failed to update prices:", err);
+    }
   };
 
   useEffect(() => {
@@ -467,6 +486,13 @@ export default function App() {
             <p className="text-gray-400">Goal: {portfolio.goal}</p>
           </div>
           <div className="flex items-center gap-3">
+            <button 
+              onClick={updatePrices}
+              className="p-3 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition-all active:scale-95 text-gray-400 hover:text-white"
+              title="Refresh Prices"
+            >
+              <RefreshCw size={18} />
+            </button>
             <button 
               onClick={() => setShowAddFundsModal(true)}
               className="flex items-center gap-2 px-6 py-3 rounded-full font-semibold bg-white/5 hover:bg-white/10 border border-white/10 transition-all active:scale-95"

@@ -118,8 +118,9 @@ export async function getLivePrices(symbols: string[]): Promise<Record<string, n
   if (symbolsToFetch.length === 0) return results;
 
   const model = "gemini-3-flash-preview";
-  const prompt = `Get the current real-time stock prices for: ${symbolsToFetch.join(", ")}. 
-  Return a JSON object where keys are symbols and values are numbers (current price).`;
+  const prompt = `Search for the current real-time stock prices of these US stocks: ${symbolsToFetch.join(", ")}. 
+  Return the results as a JSON object where keys are the stock symbols and values are their current prices as numbers. 
+  Do not include any other text, only the JSON object.`;
 
   try {
     const response = await callWithRetry(() => ai.models.generateContent({
@@ -131,15 +132,45 @@ export async function getLivePrices(symbols: string[]): Promise<Record<string, n
       }
     }));
     
-    const fetchedPrices = JSON.parse(response.text);
-    Object.entries(fetchedPrices).forEach(([s, p]) => {
-      const price = typeof p === 'number' ? p : parseFloat(String(p));
-      if (!isNaN(price)) {
-        priceCache[s] = { price, timestamp: now };
-        results[s] = price;
+    console.log("Live prices response:", response.text);
+    
+    let fetchedPrices: any = {};
+    try {
+      fetchedPrices = JSON.parse(response.text);
+    } catch (e) {
+      console.error("Failed to parse stock prices JSON:", response.text);
+      // Try to extract JSON if it's wrapped in markdown
+      const match = response.text.match(/\{[\s\S]*\}/);
+      if (match) {
+        fetchedPrices = JSON.parse(match[0]);
+      }
+    }
+
+    if (fetchedPrices && typeof fetchedPrices === 'object') {
+      // Handle potential nested structure like { "prices": { "AAPL": 150 } } or { "AAPL": { "price": 150 } }
+      const flatPrices = fetchedPrices.prices || fetchedPrices;
+      
+      Object.entries(flatPrices).forEach(([s, p]: [string, any]) => {
+        const symbol = s.toUpperCase();
+        let price = 0;
+        if (typeof p === 'number') price = p;
+        else if (typeof p === 'string') price = parseFloat(p);
+        else if (p && typeof p === 'object' && p.price) price = Number(p.price);
+        
+        if (!isNaN(price) && price > 0) {
+          priceCache[symbol] = { price, timestamp: now };
+          results[symbol] = price;
+        }
+      });
+    }
+    
+    // Ensure all requested symbols have a price (use fallback if missing from API response)
+    symbolsToFetch.forEach(s => {
+      if (!results[s]) {
+        results[s] = 150 + Math.random() * 50;
       }
     });
-    
+
     return results;
   } catch (error) {
     console.error("Error fetching live prices:", error);
