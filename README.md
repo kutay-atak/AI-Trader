@@ -1,15 +1,13 @@
+# AI-Trader
 
-This contains everything you need to run your app locally.
+AI-assisted trading web app built with React, Vite and the Gemini API.
 
-View your app: https://ai.studio/apps/f22ee84e-602c-4e5e-8000-2efaad5948a7
+**Live demo:** https://ai-trader-beta.vercel.app
 
-## Run Locally
+## Run locally
 
-**Prerequisites:**  Node.js
+Prerequisites: Node.js
 
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+1. `npm install`
+2. Copy `.env.example` to `.env.local` and set `GEMINI_API_KEY`
+3. `npm run dev`
